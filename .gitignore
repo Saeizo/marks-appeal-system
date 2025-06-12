@@ -1,0 +1,4 @@
+.env
+config/db.php
+ussd_debug.log
+vendor/
