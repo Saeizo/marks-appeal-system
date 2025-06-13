@@ -2,130 +2,72 @@
 require_once '../config/db.php';
 require_once '../controllers/marksController.php';
 require_once '../controllers/appealsController.php';
-require_once '../controllers/adminUssdController.php'; // Admin logic
+require_once '../controllers/adminUssdController.php';
 
-// Enable error reporting for debugging (remove in production)
+// Enable debugging during development
 ini_set('display_errors', 1);
-ini_set('display_startup_errors', 1);
 error_reporting(E_ALL);
 
-// Accept both POST and GET
-$sessionId   = $_POST["sessionId"] ?? $_GET["sessionId"] ?? '';
-$phoneNumber = $_POST["phoneNumber"] ?? $_GET["phoneNumber"] ?? '';
-$text        = $_POST["text"] ?? $_GET["text"] ?? '';
+$sessionId   = $_POST['sessionId'] ?? $_GET['sessionId'] ?? '';
+$phoneNumber = $_POST['phoneNumber'] ?? $_GET['phoneNumber'] ?? '';
+$text        = $_POST['text'] ?? $_GET['text'] ?? '';
 
-// Debug log (optional)
 file_put_contents("ussd_debug.log", date('Y-m-d H:i:s') . " | text: $text | phone: $phoneNumber\n", FILE_APPEND);
 
-// Check if the user is an admin
-function isAdmin($phone, $conn) {
-    $stmt = $conn->prepare("SELECT * FROM admins WHERE phone_number = ?");
+function isAdminUser(string $phone, PDO $conn): bool {
+    $stmt = $conn->prepare("SELECT 1 FROM admins WHERE phone_number = ? LIMIT 1");
     $stmt->execute([$phone]);
-    return $stmt->rowCount() > 0;
+    return $stmt->fetchColumn() !== false;
 }
 
-// Admin route
-if (isAdmin($phoneNumber, $conn)) {
-    $response = handleAdminUssd($text, $conn);
-    header('Content-type: text/plain');
-    echo $response;
-    exit;
+function getMainMenu(): string {
+    return "CON Welcome to the Marks Appeal System\n1. Check my marks\n2. Appeal my marks\n3. Exit";
 }
 
-// Student USSD flow
-$input = explode("*", $text);
-$level = count($input);
-$response = "";
+function getStudentIdPrompt(): string {
+    return "CON Enter your Student ID:\n0. Back";
+}
 
-try {
+function handleStudentFlow(array $input, int $level, PDO $conn): string {
     switch ($level) {
         case 1:
-            switch ($input[0]) {
-                case "":
-                    $response  = "CON Welcome to the Marks Appeal System\n";
-                    $response .= "1. Check my marks\n";
-                    $response .= "2. Appeal my marks\n";
-                    $response .= "3. Exit";
-                    break;
-
-                case "1":
-                case "2":
-                    $response = "CON Enter your Student ID:\n0. Back";
-                    break;
-
-                case "3":
-                    $response = "END Thank you for using the Marks Appeal System.";
-                    break;
-
-                default:
-                    $response = "END Invalid choice. Try again.";
-                    break;
-            }
-            break;
+            return getMainMenu();
 
         case 2:
-            if ($input[1] === "0") {
-                $response  = "CON Welcome to the Marks Appeal System\n";
-                $response .= "1. Check my marks\n";
-                $response .= "2. Appeal my marks\n";
-                $response .= "3. Exit";
-            } else {
-                switch ($input[0]) {
-                    case "1":
-                        $studentId = trim($input[1]);
-                        $response  = checkMarks($studentId, $conn);
-                        break;
-
-                    case "2":
-                        $studentId = trim($input[1]);
-                        $response  = getStudentModules($studentId, $conn);
-                        break;
-
-                    default:
-                        $response = "END Invalid input.";
-                        break;
-                }
-            }
-            break;
+            if ($input[1] === "0") return getMainMenu();
+            return match ($input[0]) {
+                "1" => checkMarks(trim($input[1]), $conn),
+                "2" => getStudentModules(trim($input[1]), $conn),
+                default => "END Invalid input."
+            };
 
         case 3:
-            if ($input[2] === "0") {
-                $response = "CON Enter your Student ID:\n0. Back";
-            } elseif ($input[0] === "2") {
-                $response = "CON Enter your reason for appeal:\n0. Back";
-            } else {
-                $response = "END Invalid input.";
-            }
-            break;
+            if ($input[2] === "0") return getStudentIdPrompt();
+            return ($input[0] === "2") ? "CON Enter your reason for appeal:\n0. Back" : "END Invalid input.";
 
         case 4:
-            if ($input[3] === "0") {
-                $response = getStudentModules(trim($input[1]), $conn);
-            } elseif ($input[0] === "2") {
-                $studentId   = trim($input[1]);
-                $moduleIndex = intval($input[2]);
-                $reason      = trim($input[3]);
+            if ($input[3] === "0") return getStudentModules(trim($input[1]), $conn);
+            if ($input[0] !== "2") return "END Invalid input.";
 
-                try {
-                    $response = submitAppeal($studentId, $moduleIndex, $reason, $conn);
-                } catch (Exception $e) {
-                    file_put_contents("ussd_debug.log", date('Y-m-d H:i:s') . " | submitAppeal error: " . $e->getMessage() . "\n", FILE_APPEND);
-                    $response = "END An error occurred while submitting your appeal. Please try again later.";
-                }
-            } else {
-                $response = "END Invalid input.";
+            $studentId = trim($input[1]);
+            $moduleIndex = intval($input[2]);
+            $reason = trim($input[3]);
+
+            try {
+                return submitAppeal($studentId, $moduleIndex, $reason, $conn);
+            } catch (Exception $e) {
+                file_put_contents("ussd_debug.log", date('Y-m-d H:i:s') . " | submitAppeal error: {$e->getMessage()}\n", FILE_APPEND);
+                return "END An error occurred. Please try again later.";
             }
-            break;
 
         default:
-            $response = "END Invalid request.";
-            break;
+            return "END Invalid request.";
     }
-} catch (Exception $e) {
-    file_put_contents("ussd_debug.log", date('Y-m-d H:i:s') . " | General error: " . $e->getMessage() . "\n", FILE_APPEND);
-    $response = "END An unexpected error occurred. Please try again later.";
 }
 
-// Output USSD response
+$response = isAdminUser($phoneNumber, $conn)
+    ? handleAdminUssd($text, $conn)
+    : handleStudentFlow(explode("*", $text), substr_count($text, "*") + 1, $conn);
+
 header('Content-type: text/plain');
 echo $response;
